@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Resources\UserResource;
+use App\Jobs\SendWelcomeEmailJob;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
@@ -24,6 +25,8 @@ class AuthController extends Controller
             'email' => $request->validated('email'),
             'password' => Hash::make($request->validated('password')),
         ]);
+
+        SendWelcomeEmailJob::dispatch($user);
 
         $token = Auth::guard('api')->login($user);
 
