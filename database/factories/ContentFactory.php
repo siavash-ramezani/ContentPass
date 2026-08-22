@@ -30,4 +30,24 @@ class ContentFactory extends Factory
             'published_at' => fake()->dateTimeBetween('-6 months', 'now'),
         ];
     }
+
+    /**
+     * Indicate that the content has not been published yet.
+     */
+    public function unpublished(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'published_at' => null,
+        ]);
+    }
+
+    /**
+     * Indicate that the content is scheduled for a future publish date.
+     */
+    public function futureDated(): static
+    {
+        return $this->state(fn (array $attributes) => [
+            'published_at' => now()->addWeek(),
+        ]);
+    }
 }

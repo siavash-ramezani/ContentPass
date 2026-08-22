@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\V1\AdminController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\ContentController;
 use App\Http\Controllers\Api\V1\HealthController;
 use Illuminate\Support\Facades\Route;
 
@@ -17,6 +18,10 @@ Route::prefix('v1')->group(function () {
             Route::post('refresh', [AuthController::class, 'refresh']);
             Route::get('me', [AuthController::class, 'me']);
         });
+    });
+
+    Route::middleware('auth:api')->group(function () {
+        Route::get('content', [ContentController::class, 'index']);
     });
 
     Route::prefix('admin')->middleware(['auth:api', 'role:admin'])->group(function () {

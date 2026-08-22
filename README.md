@@ -2,7 +2,7 @@
 
 ContentPass is the backend API for a subscription-based content platform — creators publish gated content, and subscribers pay for tiered access to it. This repository is the Laravel API that will power that platform.
 
-> **Status: Day 5** of a portfolio build. So far: project setup + JWT auth scaffolding (Day 1), database schema for plans/content/subscriptions (Day 2), role-based access control (Day 3), and Redis-backed background jobs via Horizon (Day 5). No subscription/content business logic yet — see [Roadmap](#roadmap).
+> **Status: Day 6** of a portfolio build. So far: project setup + JWT auth scaffolding (Day 1), database schema for plans/content/subscriptions (Day 2), role-based access control (Day 3), Redis-backed background jobs via Horizon (Day 5), and a cached content listing endpoint (Day 6). No subscription purchase/management logic yet — see [Roadmap](#roadmap).
 
 ## Tech Stack
 
@@ -10,6 +10,7 @@ ContentPass is the backend API for a subscription-based content platform — cre
 - **Auth:** JWT via [tymon/jwt-auth](https://github.com/tymondesigns/jwt-auth)
 - **Database:** MySQL
 - **Queues:** Redis, managed with [Laravel Horizon](https://laravel.com/docs/horizon)
+- **Cache:** Redis
 - **Code style:** Laravel Pint
 
 ## Project Structure
@@ -33,7 +34,7 @@ Why this shape:
 - **`Controllers/Api/V1/`** — versioning from day one means a `V2` can be introduced later without breaking existing clients.
 - **`Requests/`** — validation rules live outside controllers so controllers stay thin and requests stay testable/reusable.
 - **`Resources/`** — response shaping is centralized, so the JSON contract (e.g. hiding internal fields) doesn't leak across controllers.
-- **`Services/`** — a home for business logic as the domain grows (subscription logic, billing, content access rules), keeping controllers as thin HTTP adapters rather than where logic accumulates.
+- **`Services/`** — business logic that doesn't belong in a controller or model, e.g. `ContentAccessService` (Day 6) handles fetching/caching published content and computing per-user access — keeping controllers as thin HTTP adapters rather than where logic accumulates.
 
 ## API Conventions
 
@@ -88,6 +89,16 @@ php artisan queue:work
 
 **Seeing the emails:** `MAIL_MAILER=log` by default, so nothing is actually sent — rendered emails are appended to `storage/logs/laravel.log` instead. Register a user and check that file to see the welcome email.
 
+## Caching
+
+The published content list (`GET /api/v1/content`) is cached in Redis via `App\Services\ContentAccessService`:
+
+- **What's cached:** the raw, unpaginated result of `Content::whereNotNull('published_at')->where('published_at', '<=', now())->get()` — the same for every user. It is deliberately cached *before* pagination and before the per-user `accessible` flag is computed, so one cache entry serves all users and all pages.
+- **Cache key:** a single fixed key, `content:published` (`ContentAccessService::CACHE_KEY`) — not user-specific, since the underlying list doesn't vary per user.
+- **TTL:** 300 seconds / 5 minutes (`ContentAccessService::CACHE_TTL_SECONDS`), via `Cache::remember()`.
+- **Per-request work:** after the (possibly cached) list is fetched, the controller paginates it in memory and calls `ContentAccessService::isAccessibleTo()` for each item against the current user's plan level (`users.plan_id -> plans.level`, defaulting to level 0 with no plan). None of that is cached.
+- **Invalidation:** `App\Observers\ContentObserver`, registered on the `Content` model in `AppServiceProvider::boot()`, calls `ContentAccessService::forgetCache()` on `created`, `updated`, and `deleted` — so the very next request after any content change re-queries the database instead of serving stale data.
+
 ## Setup
 
 **Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally (Docker support for all of this comes later).
@@ -126,6 +137,7 @@ The API is now available at `http://localhost:8000`. In a separate terminal, run
 | POST   | `/api/v1/auth/logout`    | Yes            | —               | Invalidate current token   |
 | POST   | `/api/v1/auth/refresh`   | Yes            | —               | Refresh the JWT            |
 | GET    | `/api/v1/auth/me`        | Yes            | —               | Get the current user       |
+| GET    | `/api/v1/content`        | Yes            | —               | Paginated list of published content, with a per-user `accessible` flag |
 | GET    | `/api/v1/admin/ping`     | Yes            | `admin`         | Placeholder — proves RBAC works |
 
 Authenticated requests use `Authorization: Bearer <token>`.
@@ -141,5 +153,6 @@ Authenticated requests use `Authorization: Bearer <token>`.
 - ~~**Day 2:** `role`/`plan_id` schema, `plans`/`contents`/`subscriptions` tables~~ ✅
 - ~~**Day 3:** RBAC middleware (`role:admin`)~~ ✅
 - ~~**Day 5:** Redis queues, Horizon, welcome-email background job~~ ✅
-- **Next up:** Content and subscription business logic (gated content access by plan level, subscription lifecycle), plan/content management endpoints for admins
-- **Later:** Redis caching, more background jobs (webhooks, digest emails), Docker-based local environment
+- ~~**Day 6:** Cached, paginated content listing endpoint with per-user plan-based access~~ ✅
+- **Next up:** Subscription purchase/management (create/cancel, plan upgrades), admin content/plan management endpoints
+- **Later:** More background jobs (webhooks, digest emails), Docker-based local environment
