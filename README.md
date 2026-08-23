@@ -1,8 +1,8 @@
 # ContentPass
 
-ContentPass is the backend API for a subscription-based content platform — creators publish gated content, and subscribers pay for tiered access to it. This repository is the Laravel API that will power that platform.
+ContentPass is a REST API for a subscription-based content platform — creators publish gated content, and subscribers get access based on their plan tier. This is a **portfolio project**, built incrementally in public over a series of days; it is not a production system.
 
-> **Status: Day 6** of a portfolio build. So far: project setup + JWT auth scaffolding (Day 1), database schema for plans/content/subscriptions (Day 2), role-based access control (Day 3), Redis-backed background jobs via Horizon (Day 5), and a cached content listing endpoint (Day 6). No subscription purchase/management logic yet — see [Roadmap](#roadmap).
+> **Status: Day 7.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, and a Redis-cached content listing endpoint. See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
 
 ## Tech Stack
 
@@ -11,22 +11,53 @@ ContentPass is the backend API for a subscription-based content platform — cre
 - **Database:** MySQL
 - **Queues:** Redis, managed with [Laravel Horizon](https://laravel.com/docs/horizon)
 - **Cache:** Redis
+- **Testing:** PHPUnit
 - **Code style:** Laravel Pint
+
+## API Overview
+
+All endpoints are versioned under `/api/v1`. Authenticated requests use `Authorization: Bearer <token>`. Full detail (params, status codes) is in the [Endpoints](#endpoints) table further down.
+
+**Auth**
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/auth/register` | Create an account |
+| POST | `/auth/login` | Exchange credentials for a JWT |
+| POST | `/auth/refresh` | Refresh an expiring JWT |
+| POST | `/auth/logout` | Invalidate the current token |
+| GET | `/auth/me` | Get the authenticated user |
+
+**Content**
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/content` | Paginated list of published content, with a per-user `accessible` flag |
+
+**Admin**
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/admin/ping` | Placeholder route proving the `admin`-only RBAC gate works |
+
+**Misc**
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/health` | Health check |
 
 ## Project Structure
 
-This is an API-only project — `routes/api.php` is the entry point, and the default Blade/web scaffolding has been stripped out. The `app/` folder is organized to feel domain-driven even at this early stage, so it scales cleanly as subscriptions/plans/content are added in later days:
+This is an API-only project — `routes/api.php` is the entry point, and the default Blade/web scaffolding has been stripped out. The `app/` folder is organized to feel domain-driven, so it scales cleanly as subscription/billing logic is added:
 
 ```
 app/
 ├── Http/
 │   ├── Controllers/
-│   │   ├── Api/V1/       # Versioned API controllers (AuthController, HealthController, ...)
+│   │   ├── Api/V1/       # Versioned API controllers (AuthController, ContentController, ...)
 │   │   └── Concerns/     # Shared controller traits (e.g. consistent JSON responses)
 │   ├── Requests/         # Form Request validation classes (grouped by domain, e.g. Auth/)
 │   └── Resources/        # API Resource transformers (response shaping)
 ├── Models/                # Eloquent models
-└── Services/              # Business logic layer, kept separate from controllers
+├── Observers/             # Model observers (e.g. cache invalidation)
+├── Services/              # Business logic that doesn't belong in a controller or model
+└── Jobs/                  # Queued jobs
 ```
 
 Why this shape:
@@ -34,7 +65,7 @@ Why this shape:
 - **`Controllers/Api/V1/`** — versioning from day one means a `V2` can be introduced later without breaking existing clients.
 - **`Requests/`** — validation rules live outside controllers so controllers stay thin and requests stay testable/reusable.
 - **`Resources/`** — response shaping is centralized, so the JSON contract (e.g. hiding internal fields) doesn't leak across controllers.
-- **`Services/`** — business logic that doesn't belong in a controller or model, e.g. `ContentAccessService` (Day 6) handles fetching/caching published content and computing per-user access — keeping controllers as thin HTTP adapters rather than where logic accumulates.
+- **`Services/`** — business logic that doesn't belong in a controller or model, e.g. `ContentAccessService` handles fetching/caching published content and computing per-user access — keeping controllers as thin HTTP adapters rather than where logic accumulates.
 
 ## API Conventions
 
@@ -52,7 +83,7 @@ Login and register are rate-limited (5 requests/minute per IP) to slow down brut
 
 ## Authorization
 
-Role checks are enforced by the `role` route middleware (`App\Http\Middleware\EnsureUserHasRole`, aliased as `role` in `bootstrap/app.php`). It reads the authenticated user's `role` column (`user` or `admin`, from the Day 2 schema) and compares it against the role(s) passed to the middleware.
+Role checks are enforced by the `role` route middleware (`App\Http\Middleware\EnsureUserHasRole`, aliased as `role` in `bootstrap/app.php`). It reads the authenticated user's `role` column (`user` or `admin`) and compares it against the role(s) passed to the middleware.
 
 To protect a route, stack it behind `auth:api` (so there's an authenticated user to check) and `role:<name>`:
 
@@ -101,7 +132,7 @@ The published content list (`GET /api/v1/content`) is cached in Redis via `App\S
 
 ## Setup
 
-**Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally (Docker support for all of this comes later).
+**Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally (Docker support for all of this is planned — see below).
 
 ```bash
 git clone <repo-url> content-pass
@@ -112,20 +143,37 @@ composer install
 cp .env.example .env
 php artisan key:generate
 php artisan jwt:secret
-
-# Edit .env: set DB_DATABASE, DB_USERNAME, DB_PASSWORD for your local MySQL,
-# and create the database, e.g.:
-#   mysql -u root -e "CREATE DATABASE content_pass;"
-#
-# Also confirm Redis is reachable at REDIS_HOST:REDIS_PORT — it backs the
-# queue (QUEUE_CONNECTION=redis) and Horizon's dashboard metrics.
-
-php artisan migrate
-
-php artisan serve
 ```
 
-The API is now available at `http://localhost:8000`. In a separate terminal, run `php artisan horizon` (or `php artisan queue:work` — see [Background Jobs](#background-jobs)) to process queued jobs like the welcome email.
+Edit `.env` and set the values below for your local environment (all are already present in `.env.example`, grouped here by what they're for):
+
+| Purpose | Variables |
+|---|---|
+| App | `APP_NAME`, `APP_URL` |
+| Database (MySQL) | `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` |
+| Redis (queue + cache) | `REDIS_CLIENT`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `QUEUE_CONNECTION=redis`, `CACHE_STORE=redis` |
+| JWT | `JWT_SECRET` (generated by `jwt:secret` above), `JWT_TTL` |
+| Mail | `MAIL_MAILER` (`log` by default — see [Background Jobs](#background-jobs)) |
+
+> `REDIS_CLIENT=predis` by default, since the phpredis PHP extension isn't available on every machine (predis is a pure-PHP client and needs nothing beyond `composer install`). Switch to `REDIS_CLIENT=phpredis` if you have the extension installed.
+
+Create the database, then migrate and seed (seed data includes the Free/Pro/Team plans and sample content, used by the content listing endpoint):
+
+```bash
+mysql -u root -e "CREATE DATABASE content_pass;"
+
+php artisan migrate --seed
+```
+
+Run the API and, in a separate terminal, a queue worker:
+
+```bash
+php artisan serve
+# in a second terminal:
+php artisan horizon      # or `php artisan queue:work` — see Background Jobs
+```
+
+The API is now available at `http://localhost:8000`.
 
 ### Endpoints
 
@@ -140,7 +188,13 @@ The API is now available at `http://localhost:8000`. In a separate terminal, run
 | GET    | `/api/v1/content`        | Yes            | —               | Paginated list of published content, with a per-user `accessible` flag |
 | GET    | `/api/v1/admin/ping`     | Yes            | `admin`         | Placeholder — proves RBAC works |
 
-Authenticated requests use `Authorization: Bearer <token>`.
+### Running Tests
+
+```bash
+php artisan test
+```
+
+Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `array` cache/session/mail drivers, so they don't need a real MySQL or Redis connection.
 
 ### Code Style
 
@@ -148,11 +202,19 @@ Authenticated requests use `Authorization: Bearer <token>`.
 ./vendor/bin/pint
 ```
 
-## Roadmap
+## Implemented
 
-- ~~**Day 2:** `role`/`plan_id` schema, `plans`/`contents`/`subscriptions` tables~~ ✅
-- ~~**Day 3:** RBAC middleware (`role:admin`)~~ ✅
-- ~~**Day 5:** Redis queues, Horizon, welcome-email background job~~ ✅
-- ~~**Day 6:** Cached, paginated content listing endpoint with per-user plan-based access~~ ✅
-- **Next up:** Subscription purchase/management (create/cancel, plan upgrades), admin content/plan management endpoints
-- **Later:** More background jobs (webhooks, digest emails), Docker-based local environment
+- JWT authentication — register, login, refresh, logout, current-user endpoint
+- RBAC middleware — `role:<name>` route middleware backed by a `role` column on `users`
+- Database schema — `plans`, `contents`, `subscriptions`, plus `role`/`plan_id` on `users`
+- Queued email notifications — a welcome email sent via a Redis-queued job, managed with Laravel Horizon
+- Redis-cached content listing — a paginated, plan-aware content endpoint with observer-based cache invalidation
+
+## Planned
+
+- Subscription purchase and management flow (create/cancel, plan upgrades)
+- Admin endpoints for managing plans and content
+- Docker Compose for local development (app, MySQL, Redis in containers)
+- A Next.js frontend
+- CI pipeline (lint, test, on every push)
+- Expanded test coverage
