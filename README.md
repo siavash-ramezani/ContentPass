@@ -2,7 +2,7 @@
 
 ContentPass is a REST API for a subscription-based content platform — creators publish gated content, and subscribers get access based on their plan tier. This is a **portfolio project**, built incrementally in public over a series of days; it is not a production system.
 
-> **Status: Day 7.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, and a Redis-cached content listing endpoint. See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
+> **Status: Day 7+.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, a Redis-cached content listing endpoint, and a mock subscription/billing flow. See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
 
 ## Tech Stack
 
@@ -31,6 +31,18 @@ All endpoints are versioned under `/api/v1`. Authenticated requests use `Authori
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | GET | `/content` | Paginated list of published content, with a per-user `accessible` flag |
+
+**Plans**
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/plans` | Public list of available plans — browsable before signup, no auth needed |
+
+**Subscriptions** *(mock billing — see [Subscriptions](#subscriptions) below)*
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/subscriptions` | Subscribe to a plan (cancels any existing active subscription first) |
+| GET | `/subscriptions/current` | Get the current active subscription, or `null` if none |
+| DELETE | `/subscriptions/current` | Cancel the current active subscription |
 
 **Admin**
 | Method | Endpoint | Purpose |
@@ -130,6 +142,16 @@ The published content list (`GET /api/v1/content`) is cached in Redis via `App\S
 - **Per-request work:** after the (possibly cached) list is fetched, the controller paginates it in memory and calls `ContentAccessService::isAccessibleTo()` for each item against the current user's plan level (`users.plan_id -> plans.level`, defaulting to level 0 with no plan). None of that is cached.
 - **Invalidation:** `App\Observers\ContentObserver`, registered on the `Content` model in `AppServiceProvider::boot()`, calls `ContentAccessService::forgetCache()` on `created`, `updated`, and `deleted` — so the very next request after any content change re-queries the database instead of serving stale data.
 
+## Subscriptions
+
+Subscribing a user to a plan is handled by `App\Services\SubscriptionService`, used from `SubscriptionController`:
+
+- **Subscribing** (`POST /api/v1/subscriptions`, body `{ "plan_id": ... }`) creates a new `Subscription` with `status=active`, `started_at=now`, `renews_at=now+30 days`, and sets `users.plan_id` to match. If the user already has an active subscription, it's canceled first (`status=canceled`, `canceled_at=now`) — this is how a plan upgrade/downgrade is modeled: there's no separate "swap plan" endpoint, subscribing to a new plan always supersedes the old one.
+- **Canceling** (`DELETE /api/v1/subscriptions/current`) cancels the active subscription and resets `users.plan_id` to `null` (the free tier). Returns 404 if there's nothing active to cancel.
+- **Reading** (`GET /api/v1/subscriptions/current`) returns the active subscription with plan details, or `null`.
+
+**This is mock billing — there is no real payment gateway.** `POST /api/v1/subscriptions` simulates the *outcome* of a successful payment; it doesn't charge anyone or talk to any payment provider. A real integration (e.g. Stripe) would look different: the client would create a Checkout Session / PaymentIntent, and the `Subscription` row would be created from a webhook after the provider confirms payment actually succeeded — not synchronously from this request. `SubscriptionController::store()` has a comment marking exactly where that swap would happen.
+
 ## Setup
 
 **Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally (Docker support for all of this is planned — see below).
@@ -157,7 +179,7 @@ Edit `.env` and set the values below for your local environment (all are already
 
 > `REDIS_CLIENT=predis` by default, since the phpredis PHP extension isn't available on every machine (predis is a pure-PHP client and needs nothing beyond `composer install`). Switch to `REDIS_CLIENT=phpredis` if you have the extension installed.
 
-Create the database, then migrate and seed (seed data includes the Free/Pro/Team plans and sample content, used by the content listing endpoint):
+Create the database, then migrate and seed (seed data includes the Free/Pro/Team plans and sample content, used by the content listing and subscription endpoints):
 
 ```bash
 mysql -u root -e "CREATE DATABASE content_pass;"
@@ -186,6 +208,10 @@ The API is now available at `http://localhost:8000`.
 | POST   | `/api/v1/auth/refresh`   | Yes            | —               | Refresh the JWT            |
 | GET    | `/api/v1/auth/me`        | Yes            | —               | Get the current user       |
 | GET    | `/api/v1/content`        | Yes            | —               | Paginated list of published content, with a per-user `accessible` flag |
+| GET    | `/api/v1/plans`          | No             | —               | Public list of available plans |
+| POST   | `/api/v1/subscriptions`  | Yes            | —               | Subscribe to a plan (mock billing — see [Subscriptions](#subscriptions)) |
+| GET    | `/api/v1/subscriptions/current` | Yes     | —               | Get the current active subscription, or `null` |
+| DELETE | `/api/v1/subscriptions/current` | Yes     | —               | Cancel the current active subscription |
 | GET    | `/api/v1/admin/ping`     | Yes            | `admin`         | Placeholder — proves RBAC works |
 
 ### Running Tests
@@ -209,10 +235,11 @@ Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `ar
 - Database schema — `plans`, `contents`, `subscriptions`, plus `role`/`plan_id` on `users`
 - Queued email notifications — a welcome email sent via a Redis-queued job, managed with Laravel Horizon
 - Redis-cached content listing — a paginated, plan-aware content endpoint with observer-based cache invalidation
+- Mock subscription/billing flow — subscribe/cancel/read current subscription, with plan upgrades modeled as cancel-then-resubscribe (no real payment gateway)
 
 ## Planned
 
-- Subscription purchase and management flow (create/cancel, plan upgrades)
+- Real payment gateway integration (Stripe or similar) in place of the mock billing flow
 - Admin endpoints for managing plans and content
 - Docker Compose for local development (app, MySQL, Redis in containers)
 - A Next.js frontend
