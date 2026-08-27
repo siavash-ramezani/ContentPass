@@ -1,0 +1,87 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8000/api/v1/health') ? 0 : 1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["php", "artisan", "horizon"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../content-pass-web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # NEXT_PUBLIC_* vars are inlined into the browser bundle at build time,
+      # so this one MUST be reachable from the user's browser — the browser
+      # can't resolve Docker's internal service hostnames, only the port
+      # published to the host machine.
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      # Day 9's dashboard is server-rendered, meaning some API calls happen
+      # from the Node.js process running inside THIS container instead of
+      # the browser. That process is on the Docker Compose network, where
+      # "localhost" means the frontend container itself, not the backend —
+      # it needs the internal service name instead. This assumes the
+      # frontend's SSR code reads this (non-public) API_URL for server-side
+      # fetches; that's an assumption about content-pass-web's Day 9
+      # implementation that I haven't inspected or modified from this repo.
+      API_URL: http://app:8000/api/v1
+    depends_on:
+      app:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: content_pass
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql-data:
+  redis-data:
