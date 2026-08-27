@@ -2,7 +2,7 @@
 
 ContentPass is a REST API for a subscription-based content platform — creators publish gated content, and subscribers get access based on their plan tier. This is a **portfolio project**, built incrementally in public over a series of days; it is not a production system.
 
-> **Status: Day 7+.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, a Redis-cached content listing endpoint, and a mock subscription/billing flow. See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
+> **Status: Day 11+.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, a Redis-cached content listing endpoint, a mock subscription/billing flow, and a `docker compose up` local stack (backend + sibling frontend + MySQL + Redis). See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
 
 ## Tech Stack
 
@@ -13,6 +13,7 @@ ContentPass is a REST API for a subscription-based content platform — creators
 - **Cache:** Redis
 - **Testing:** PHPUnit
 - **Code style:** Laravel Pint
+- **Local dev:** Docker Compose (backend, queue worker, MySQL, Redis, and the sibling frontend)
 
 ## API Overview
 
@@ -154,7 +155,48 @@ Subscribing a user to a plan is handled by `App\Services\SubscriptionService`, u
 
 ## Setup
 
-**Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally (Docker support for all of this is planned — see below).
+### Running with Docker (recommended)
+
+**Prerequisites:**
+- Docker and Docker Compose v2 (the `docker compose` command — not the old standalone `docker-compose` v1 script)
+- The `content-pass-web` frontend cloned as a **sibling directory** next to this one:
+  ```
+  some-folder/
+  ├── content-pass/        (this repo)
+  └── content-pass-web/
+  ```
+
+Then, from inside `content-pass/`:
+
+```bash
+docker compose up
+```
+
+That's it — no `.env` to create by hand. `docker-compose.yml` builds this repo's `Dockerfile` for the `app` and `queue` services, and the entrypoint script (`docker/entrypoint.sh`) creates `.env` from `.env.example` on first start (if it isn't already there), generates `APP_KEY`/`JWT_SECRET` if they're missing, and runs `migrate --seed` before starting the server — every time, safely (migrations only apply what's pending, and both seeders use `updateOrCreate`).
+
+**What comes up:**
+
+| Service | URL | Notes |
+|---|---|---|
+| Backend API | http://localhost:8000/api/v1 | This repo |
+| Horizon dashboard | http://localhost:8000/horizon | Open with no login in `local` env — see [Background Jobs](#background-jobs) |
+| Frontend | http://localhost:3000 | Built from `../content-pass-web` |
+| MySQL | internal only (`mysql:3306`) | Named volume `mysql-data` persists data across restarts |
+| Redis | internal only (`redis:6379`) | Named volume `redis-data`; backs both the queue and the cache |
+
+`queue` runs `php artisan horizon` instead of serving HTTP — it's a second container built from the *same* image as `app`, just with a different command, so Horizon jobs (like the Day 5 welcome email) actually process. Unlike on native Windows, `pcntl` is available inside the Linux container, so `php artisan horizon` runs for real here (see the note in [Background Jobs](#background-jobs)).
+
+**Why `php artisan serve` instead of Nginx + PHP-FPM:** for a portfolio-scope local stack, a single `php:8.2-cli`-based image running the built-in server behind a published port is simpler to build, explain, and debug than a two-process (Nginx + PHP-FPM) container or a second Nginx service — with no meaningful downside for local dev. A production deployment would use PHP-FPM behind Nginx (or a managed PHP host); that's a deliberate scope cut for this project, not an oversight.
+
+**Frontend API URL — two variables, not one:** Day 9's dashboard is server-rendered, so some API calls happen from the Node.js process inside the `frontend` container (SSR) while others (e.g. submitting the login form) happen from the user's browser. `NEXT_PUBLIC_*` variables get inlined into the browser bundle at build time, so `NEXT_PUBLIC_API_URL` has to be something the *browser* can reach — `http://localhost:8000/api/v1`, the port published to the host — since the browser has no way to resolve Docker's internal service names. The SSR calls, on the other hand, run inside the Docker network, where `localhost` means the `frontend` container itself, not the backend; those need the internal hostname, `http://app:8000/api/v1`, passed via a separate `API_URL` variable. **Caveat:** I haven't inspected or modified `content-pass-web`'s code from this repo, so this assumes its Day 9 SSR code reads `API_URL` (not the public one) for server-side fetches. If it instead uses `NEXT_PUBLIC_API_URL` universally, the SSR path will fail inside Docker and either that code or this compose file's variable needs to change.
+
+**Rebuilding after code changes:** `docker compose up --build`. To reset the database entirely: `docker compose down -v` (this drops the named volumes, including `mysql-data`).
+
+> **Verification note:** Docker itself wasn't available in the environment this was built in, so `docker compose config` / an actual build couldn't be run. What *was* verified: `docker-compose.yml` parses as valid YAML and the service/dependency graph matches what's described here; `docker/entrypoint.sh` has Unix line endings (enforced repo-wide by `.gitattributes`, so the shebang won't break in the container); and, most importantly, the Dockerfile's exact `composer install` command was dry-run locally against a copy of this repo with `tests/`, `.git`, `vendor/`, and `.env` stripped out (mirroring what `.dockerignore` actually excludes from the image) using `--ignore-platform-req=ext-pcntl --ignore-platform-req=ext-posix` (those two extensions aren't present on this Windows host but are installed explicitly in the Dockerfile for the Linux container). That dry run caught two real issues before they could surface as build failures: `laravel/horizon` requires `ext-posix` in addition to `ext-pcntl` (only the latter was in my first draft), and `composer install --no-dev` would have broken the startup seed, since `DatabaseSeeder` calls `User::factory()`, which needs `fakerphp/faker` — a dev-only package. Both are fixed in the files below. What still needs a real Docker Engine to confirm: that the image actually builds end-to-end (system package availability, `docker-php-ext-install` succeeding, etc.), that `docker compose up` brings up a working stack, and that the frontend build/`API_URL` assumption above holds against the real `content-pass-web` code.
+
+### Manual setup (without Docker)
+
+**Prerequisites:** PHP 8.2+, Composer, MySQL running locally, Redis running locally.
 
 ```bash
 git clone <repo-url> content-pass
@@ -167,13 +209,13 @@ php artisan key:generate
 php artisan jwt:secret
 ```
 
-Edit `.env` and set the values below for your local environment (all are already present in `.env.example`, grouped here by what they're for):
+Edit `.env` and set the values below for your local environment (all are already present in `.env.example`, grouped here by what they're for — note the defaults are now Docker-oriented, so `DB_HOST`/`REDIS_HOST` need changing for local, non-Docker use; see the inline comments in `.env.example`):
 
 | Purpose | Variables |
 |---|---|
 | App | `APP_NAME`, `APP_URL` |
-| Database (MySQL) | `DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` |
-| Redis (queue + cache) | `REDIS_CLIENT`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `QUEUE_CONNECTION=redis`, `CACHE_STORE=redis` |
+| Database (MySQL) | `DB_CONNECTION`, `DB_HOST` (→ `127.0.0.1`), `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` (→ your local root password) |
+| Redis (queue + cache) | `REDIS_CLIENT`, `REDIS_HOST` (→ `127.0.0.1`), `REDIS_PORT`, `REDIS_PASSWORD`, `QUEUE_CONNECTION=redis`, `CACHE_STORE=redis` |
 | JWT | `JWT_SECRET` (generated by `jwt:secret` above), `JWT_TTL` |
 | Mail | `MAIL_MAILER` (`log` by default — see [Background Jobs](#background-jobs)) |
 
@@ -236,12 +278,12 @@ Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `ar
 - Queued email notifications — a welcome email sent via a Redis-queued job, managed with Laravel Horizon
 - Redis-cached content listing — a paginated, plan-aware content endpoint with observer-based cache invalidation
 - Mock subscription/billing flow — subscribe/cancel/read current subscription, with plan upgrades modeled as cancel-then-resubscribe (no real payment gateway)
+- `docker compose up` local stack — backend, queue worker, MySQL, Redis, and the sibling Next.js frontend, seeded automatically on startup
 
 ## Planned
 
 - Real payment gateway integration (Stripe or similar) in place of the mock billing flow
 - Admin endpoints for managing plans and content
-- Docker Compose for local development (app, MySQL, Redis in containers)
-- A Next.js frontend
 - CI pipeline (lint, test, on every push)
 - Expanded test coverage
+- A production-oriented Docker image (PHP-FPM + Nginx) alongside the current dev-friendly one
