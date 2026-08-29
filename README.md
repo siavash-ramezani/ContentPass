@@ -264,6 +264,8 @@ php artisan test
 
 Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `array` cache/session/mail drivers, so they don't need a real MySQL or Redis connection.
 
+The Day 1 auth endpoints (register/login/refresh/logout/me) are covered by `tests/Feature/Auth/AuthenticationTest.php` — validation failures, wrong-password/unknown-email both returning the same error (no email enumeration), token invalidation on logout, and rejection of missing/malformed tokens.
+
 ### Code Style
 
 ```bash
