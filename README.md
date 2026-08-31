@@ -2,13 +2,17 @@
 
 ContentPass is a REST API for a subscription-based content platform — creators publish gated content, and subscribers get access based on their plan tier. This is a **portfolio project**, built incrementally in public over a series of days; it is not a production system.
 
-> **Status: Day 11+.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, a Redis-cached content listing endpoint, a mock subscription/billing flow, and a `docker compose up` local stack (backend + sibling frontend + MySQL + Redis). See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
+## Live Demo
+
+> **TODO:** add the live Render URL here once deployed (e.g. `https://content-pass.onrender.com`), plus a screenshot or two (the frontend dashboard, `/api/v1/health`, and/or the Horizon dashboard). `render.yaml` and the [Deployment](#deployment) section below are prepped for this; the actual deploy is a manual step.
+
+> **Status: Day 14+.** Implemented so far: JWT authentication, RBAC middleware, the core database schema, Redis-backed background jobs via Horizon, a Redis-cached content listing endpoint, a mock subscription/billing flow, a `docker compose up` local stack (backend + sibling frontend + MySQL + Redis), and Render deployment config. See [Implemented](#implemented) / [Planned](#planned) below for the full picture.
 
 ## Tech Stack
 
 - **Framework:** Laravel 12 (PHP 8.2+)
 - **Auth:** JWT via [tymon/jwt-auth](https://github.com/tymondesigns/jwt-auth)
-- **Database:** MySQL
+- **Database:** MySQL locally / in Docker Compose; Postgres on Render (see [Deployment](#deployment) — no code changes needed for the switch)
 - **Queues:** Redis, managed with [Laravel Horizon](https://laravel.com/docs/horizon)
 - **Cache:** Redis
 - **Testing:** PHPUnit
@@ -270,6 +274,27 @@ Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `ar
 ./vendor/bin/pint
 ```
 
+## Deployment
+
+Deploy prep for a live demo on [Render](https://render.com)'s free tier lives in `render.yaml` (a [Blueprint](https://render.com/docs/blueprint-spec)). **This is config only — nothing has actually been deployed.** Applying the blueprint, generating secrets, and wiring up Redis are manual steps.
+
+**Postgres, not MySQL:** Render's free managed database is Postgres — it doesn't offer free MySQL. This needed zero application code changes: `config/database.php` already ships a `pgsql` connection (same env var names as `mysql` — `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`), so switching is purely `DB_CONNECTION=pgsql` plus connection details. `render.yaml` actually wires this up with a single `DB_URL` (Render's `fromDatabase: connectionString`) instead of five separate vars — Laravel's `ConfigurationUrlParser` parses a connection URL into host/port/database/username/password automatically, and Render's Blueprint spec doesn't expose discrete host/port properties from a database reference anyway, only `connectionString`/`connectionPoolString`/`user`/`password`/`database`. The Dockerfile now installs `pdo_pgsql` alongside the existing `pdo_mysql`, so the same image still works against the local Docker Compose MySQL setup too.
+
+**Redis is external, on purpose.** Render has no free managed Redis, so the plan is [Upstash](https://upstash.com)'s free tier instead. This is *not* in `render.yaml` — a Blueprint can't populate a var from a dashboard-only external provider — so after creating the Upstash database, set these three manually in the Render dashboard: `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` (matching the names already used everywhere else in this app). `render.yaml` does set `CACHE_STORE=redis`, `QUEUE_CONNECTION=redis`, and `REDIS_CLIENT=predis` — those are just driver selection, not secrets, so they're fine to commit.
+
+**Secrets — set manually, never committed:** `APP_KEY` and `JWT_SECRET` are declared in `render.yaml` with `sync: false`, which tells Render to prompt for them during Blueprint setup instead of storing a value. Generate both locally first and paste them in when prompted:
+
+```bash
+php artisan key:generate --show
+php artisan jwt:secret --show
+```
+
+**No `preDeployCommand` — and that's correct, not an oversight.** Render's Blueprint spec has a `preDeployCommand` field for running one-off commands before a new deploy goes live, but it's explicitly *not supported for `runtime: docker` services* (Docker services get `dockerCommand` instead, which just replaces the container's `CMD` — there's no separate pre-deploy phase to hook into). So "run migrations on deploy" is instead handled by `docker/entrypoint.sh` (already built on Day 11, unchanged): it runs `php artisan migrate --seed --force` before starting the server, on every container start — idempotent and safe, and it's what actually satisfies that requirement here.
+
+**Known gap — no free worker service.** Render's free plan only runs one always-on web service; there's no free "Background Worker" for `php artisan horizon`. `render.yaml` still sets `QUEUE_CONNECTION=redis` to match every other environment, but as configured, nothing will actually consume that queue on a free-tier deploy — the one queued job (`SendWelcomeEmailJob`) will sit unprocessed rather than error. This is flagged, not solved: the two real options are paying for a Render worker later, or switching `QUEUE_CONNECTION` to `sync` in the dashboard for the demo (so the welcome email just sends inline, no worker needed). Deciding between them wasn't part of today's config-only scope.
+
+**`APP_URL`:** set to `https://content-pass.onrender.com` as a best-effort default, matching the `name:` chosen for the web service in `render.yaml` — Render assigns `<name>.onrender.com` unless that's taken, in which case it appends a suffix. Confirm this against the actual assigned URL after the first deploy and fix it in the dashboard if it doesn't match — the same value also needs to become this section's [Live Demo](#live-demo) link.
+
 ## Implemented
 
 - JWT authentication — register, login, refresh, logout, current-user endpoint
@@ -279,9 +304,12 @@ Tests use an in-memory SQLite database (configured in `phpunit.xml`) and the `ar
 - Redis-cached content listing — a paginated, plan-aware content endpoint with observer-based cache invalidation
 - Mock subscription/billing flow — subscribe/cancel/read current subscription, with plan upgrades modeled as cancel-then-resubscribe (no real payment gateway)
 - `docker compose up` local stack — backend, queue worker, MySQL, Redis, and the sibling Next.js frontend, seeded automatically on startup
+- Render deployment config (`render.yaml` + a Postgres-compatible Dockerfile) — prepared, not yet deployed; see [Deployment](#deployment)
 
 ## Planned
 
+- Actually deploying to Render and filling in the [Live Demo](#live-demo) link/screenshots
+- A decision on the free-tier queue-worker gap (see [Deployment](#deployment)) — pay for a worker, or run the queue synchronously for the demo
 - Real payment gateway integration (Stripe or similar) in place of the mock billing flow
 - Admin endpoints for managing plans and content
 - CI pipeline (lint, test, on every push)

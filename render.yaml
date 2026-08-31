@@ -1,0 +1,107 @@
+# Render Blueprint — deploys ContentPass's backend as a Docker web service
+# with a free managed Postgres database.
+#
+# This is deploy-prep only: nothing here has been applied to a real Render
+# account (that's a manual step). Field names were checked against Render's
+# Blueprint spec docs (render.com/docs/blueprint-spec) rather than assumed.
+#
+# NOT included here, on purpose:
+#   - Redis. Render has no free managed Redis; the plan is an external
+#     provider (Upstash), wired up by hand in the Render dashboard as
+#     REDIS_HOST/REDIS_PORT/REDIS_PASSWORD — see the README's Deployment
+#     section. A Blueprint can't reach into a dashboard-only var, so those
+#     three are absent from envVars below rather than faked.
+#   - A queue worker service. Render's free plan only runs one always-on
+#     web service — there's no free "Background Worker" for `php artisan
+#     horizon`. This is flagged, not solved, in the README: it needs an
+#     explicit decision (pay for a worker later, or run the queue
+#     synchronously for the demo) that isn't this config file's call to make.
+
+databases:
+  - name: content-pass-db
+    plan: free
+    databaseName: content_pass
+    user: content_pass
+
+services:
+  - type: web
+    name: content-pass
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    envVars:
+      # --- App -----------------------------------------------------------
+      - key: APP_NAME
+        value: ContentPass
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      # Render assigns this service's hostname as <name>.onrender.com,
+      # which is only certain once the service actually exists (a taken
+      # name gets a suffix). Best-effort default below — confirm it
+      # against the real assigned URL after the first deploy and correct
+      # it in the dashboard if it doesn't match; this is the one value in
+      # this file most likely to need a manual fix-up post-deploy.
+      - key: APP_URL
+        value: https://content-pass.onrender.com
+
+      # --- Secrets — set manually in the Render dashboard, never committed.
+      # Generate locally first (`php artisan key:generate --show` and
+      # `php artisan jwt:secret --show` against a scratch .env), then paste
+      # the values in when Render prompts for them during Blueprint setup.
+      - key: APP_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_TTL
+        value: "60"
+
+      # --- Database: Postgres, not MySQL ---------------------------------
+      # Render's free managed DB is Postgres only. Laravel needs zero code
+      # changes for this — config/database.php already ships a 'pgsql'
+      # connection, selected purely via DB_CONNECTION. DB_URL alone is
+      # enough: Laravel's ConfigurationUrlParser parses a connection URL
+      # into host/port/database/username/password automatically, so the
+      # individual DB_HOST/DB_PORT/etc vars below are deliberately omitted
+      # in favor of the one URL (Render's Blueprint spec doesn't expose
+      # discrete host/port properties via fromDatabase, only
+      # connectionString/connectionPoolString/user/password/database, so
+      # this is also the only clean way to wire it up).
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_URL
+        fromDatabase:
+          name: content-pass-db
+          property: connectionString
+
+      # --- Cache / queue driver selection ---------------------------------
+      # These just pick the Redis driver — the actual connection details
+      # (REDIS_HOST/REDIS_PORT/REDIS_PASSWORD) are NOT here; see the note
+      # at the top of this file and the README's Deployment section.
+      - key: CACHE_STORE
+        value: redis
+      - key: QUEUE_CONNECTION
+        value: redis
+      - key: REDIS_CLIENT
+        value: predis
+
+      # --- Mail ------------------------------------------------------------
+      # Same as local dev: logs the rendered email instead of sending it,
+      # so the demo works with zero mail-provider setup. Swap to a real
+      # mailer here later if the live demo should actually send email.
+      - key: MAIL_MAILER
+        value: log
+
+# Migrations on deploy: Render's Blueprint spec has a preDeployCommand
+# field, but it's explicitly NOT supported for runtime: docker services
+# (Docker services use dockerCommand instead, which replaces the
+# container's CMD — there's no separate pre-deploy phase to hook into).
+# So this intentionally has no preDeployCommand. Instead, migrations run
+# via this repo's existing docker/entrypoint.sh (built Day 11, unchanged),
+# which already runs `php artisan migrate --seed --force` before starting
+# the server, on every container start — that's what satisfies "run
+# migrations on deploy" here, safely and idempotently, without any
+# Render-specific config.
